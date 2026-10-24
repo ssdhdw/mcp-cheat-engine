@@ -6,6 +6,11 @@
 
 <h1 align="center">Cheat Engine</h1>
 
+This fork includes an experimental MCP bridge for AI agents to interact with
+the live Cheat Engine GUI. See [MCP setup, tools, tests, and limitations](mcp/README.md).
+The first version supports process selection and numeric address-list records;
+memory scans and debugger integration are not yet implemented.
+
 Cheat Engine is a development environment focused on modding games and applications for personal use.
 
 
