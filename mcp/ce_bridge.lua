@@ -56,6 +56,94 @@ local function snapshot(r)
 end
 
 local function hex(n) return string.format('%X', n) end
+local activity_range
+local type_labels = {[vtByte]='Byte', [vtWord]='2 Bytes', [vtDword]='4 Bytes',
+  [vtQword]='8 Bytes', [vtSingle]='Float', [vtDouble]='Double', [vtAutoAssembler]='Auto Assembler'}
+
+local function short(value, limit)
+  local s = tostring(value or ''):gsub('[%c|]', ' ')
+    :gsub('\226\128[\168\169]', ' '):gsub('\194\133', ' '):gsub('%s+', ' ')
+  limit = limit or 48
+  if #s > limit then
+    local n = limit-3
+    -- Do not cut a UTF-8 character in half.
+    while n > 0 and s:byte(n+1) >= 128 and s:byte(n+1) < 192 do n = n-1 end
+    s = s:sub(1,n) .. '...'
+  end
+  return s
+end
+
+local function logaddress(value)
+  if type(value) == 'number' then return string.format('%08X', value) end
+  local s = tostring(value or '')
+  if s:match('^%x+$') then
+    s = s:upper()
+    return string.rep('0', math.max(0,8-#s)) .. short(s)
+  end
+  return short(s)
+end
+
+local function logrange(first, last)
+  return 'range - ' .. logaddress(first) .. '-' .. logaddress(last)
+end
+
+local function activity_details(a, ok)
+  local op = a[1]
+  if activity_range then return activity_range end
+  if op == 'scan_first' or op == 'scan_next' then
+    local first = op == 'scan_first'
+    local kind, value, value2 = a[first and 4 or 3], a[first and 5 or 4], a[first and 6 or 5]
+    local detail = short(kind,24)
+    local compares_value = kind == 'exact' or kind == 'bigger' or kind == 'smaller'
+      or kind == 'between' or kind == 'increased_by' or kind == 'decreased_by'
+    if compares_value and value and value ~= '' then detail = detail .. ' - ' .. short(value,32) end
+    if kind == 'between' then detail = detail .. '..' .. short(value2,32) end
+    if first then detail = detail .. ', type - ' .. (type_labels[types[a[3]]] or short(a[3])) end
+    return detail
+  elseif op == 'add' or op == 'pointer_add' or op == 'value' or op == 'freeze' or op == 'record_rename' then
+    local add = op == 'add' or op == 'pointer_add'
+    local r
+    if tonumber(a[2]) == getOpenedProcessID() then
+      local al = getAddressList()
+      if add and ok then r = al.SelectedRecord
+      elseif not add then r = al.getMemoryRecordByID(tonumber(a[3]) or -1) end
+    end
+    local detail = r and ('address - ' .. logaddress(r.CurrentAddress or r.Address))
+      or (add and ('address - ' .. logaddress(a[3])) or ('record - ' .. short(a[3],16)))
+    if add then
+      if r then detail = detail .. ', value - ' .. short(r.Value,24) end
+      local vt = add and types[a[op == 'add' and 5 or 6]]
+      detail = detail .. ', type - ' .. (type_labels[vt] or '?')
+    elseif op == 'value' then detail = detail .. ', value - ' .. short(a[4],32)
+    elseif op == 'freeze' then detail = detail .. ', ' .. (a[4] == '1' and 'freeze' or 'unfreeze')
+    else detail = detail .. ', name - ' .. short(a[4],32) end
+    return detail
+  elseif op == 'memory_read' then
+    local addr, size = tonumber(a[3],16), tonumber(a[4])
+    if addr and size and size >= 1 and size <= 4096 then return logrange(addr,addr+size-1) end
+    return 'address - ' .. logaddress(a[3])
+  elseif op == 'memory_write' or op == 'disassemble' or op:sub(1,6) == 'watch_' then
+    return 'address - ' .. logaddress(a[3])
+  elseif op == 'pointer_resolve' then return 'base - ' .. logaddress(a[3])
+  elseif op == 'script_add' then return 'name - ' .. short(a[3],40)
+  elseif op == 'script_enable' then
+    return 'record - ' .. short(a[3],16) .. ', ' .. (a[4] == '1' and 'enable' or 'disable')
+  elseif op == 'attach' then return 'pid - ' .. short(a[2],16)
+  elseif op == 'state' then return 'pid - ' .. tostring(getOpenedProcessID())
+  elseif op == 'scan_status' then return getMainForm().btnNewScan.Enabled and 'idle' or 'busy'
+  elseif op == 'records' or op == 'scan_results' then
+    local i = op == 'records' and 2 or 3
+    return 'offset - ' .. short(a[i],12) .. ', limit - ' .. short(a[i+1],12)
+  end
+  return ''
+end
+
+local function activity_line(a, ok)
+  local success, detail = pcall(activity_details, a, ok)
+  local label = short(a[1] or '?',24):gsub('[%[%]]','')
+  detail = success and short(detail,160) or ''
+  return '[' .. label .. ']' .. (detail ~= '' and (' ' .. detail) or '') .. (ok and ' | OK' or ' | FAILED')
+end
 local function address(s)
   assert(type(s) == 'string' and #s > 0 and #s <= 1024, 'Invalid address expression')
   return assert(getAddressSafe(s), 'Address could not be resolved')
@@ -192,11 +280,14 @@ local function dispatch_extra(a)
   elseif op == 'memory_read' or op == 'memory_write' then
     local addr = address(a[3])
     if op == 'memory_read' then
-      local bytes = readbytes(addr, integer(a[4], 1, 4096))
+      local size = integer(a[4], 1, 4096)
+      activity_range = logrange(addr, addr+size-1)
+      local bytes = readbytes(addr, size)
       view(addr, false)
       return json({address=hex(addr), hex=bytehex(bytes), size=#bytes})
     end
     local bytes, expected = parsebytes(a[4]), parsebytes(a[5])
+    activity_range = logrange(addr, addr+#bytes-1)
     assert(#bytes == #expected, 'New and expected byte lengths must match')
     local original = bytehex(readbytes(addr, #bytes))
     assert(original == bytehex(expected), 'Original bytes changed; write rejected')
@@ -207,6 +298,7 @@ local function dispatch_extra(a)
       verified=observed == bytehex(bytes)})
   elseif op == 'disassemble' then
     local addr, count = address(a[3]), integer(a[4], 1, 100)
+    local start = addr
     local rows = {}
     view(addr, true)
     for i=1,count do
@@ -214,6 +306,7 @@ local function dispatch_extra(a)
       assert(size and size > 0 and size <= 15, 'Instruction decode failed')
       rows[#rows+1] = {address=hex(addr), size=size, text=disassemble(addr)}
       addr = addr + size
+      activity_range = logrange(start, addr-1)
     end
     return array(rows)
   elseif op == 'pointer_resolve' or op == 'pointer_add' then
@@ -396,6 +489,8 @@ function ce_mcp.start(pipeName)
   local memo = createMemo(form)
   memo.Align = alClient
   memo.ReadOnly = true
+  memo.WordWrap = false
+  memo.Scrollbars = 3 -- ssBoth: long entries stay on one line, with horizontal scrolling.
   local function log(message)
     if memo.Lines.Count >= 200 then memo.Lines.delete(0) end
     memo.Lines.add(os.date('%H:%M:%S ') .. message)
@@ -422,8 +517,10 @@ function ce_mcp.start(pipeName)
         end
         local response
         synchronize(function()
+          activity_range = nil
           local ok, result = pcall(dispatch, args)
-          log((args[1] or '?'):gsub('[%c]', '?') .. (ok and ' OK' or ' FAILED'))
+          -- Formatting or a closed activity window must never affect the command response.
+          pcall(log, activity_line(args, ok))
           response = ok and ('{"ok":true,"result":' .. result .. '}')
                         or json({ok=false, error=tostring(result)})
         end)

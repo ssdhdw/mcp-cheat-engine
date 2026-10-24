@@ -73,6 +73,27 @@ def main():
         shutil.copytree(args.ce_exe.resolve().parent, staged_dir,
                         ignore=shutil.ignore_patterns("autorun", "plugins"))
         install_autorun.install(staged_dir)
+        # Observe the real activity memo through a test-only timer in this temporary CE.
+        # The installed bridge and its public API remain unchanged.
+        activity_path = Path(staging.name) / "activity.txt"
+        autorun = staged_dir / "autorun" / install_autorun.FILENAME
+        observe = """
+local originalCreateMemo = createMemo
+function createMemo(owner)
+  local memo = originalCreateMemo(owner)
+  if owner and owner.Caption == 'MCP agent activity - ' .. os.getenv('CE_MCP_PIPE') then
+    local timer = createTimer(owner, false)
+    timer.Interval = 30
+    timer.OnTimer = function()
+      local file = io.open([=[%s]=], 'w')
+      if file then file:write(memo.Lines.Text); file:close() end
+    end
+    timer.Enabled = true
+  end
+  return memo
+end
+""" % activity_path
+        autorun.write_text(observe + autorun.read_text(encoding="utf-8"), encoding="utf-8")
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = 0
@@ -157,6 +178,19 @@ def main():
         call("watch_remove", pid, health)
         call("scan_reset", pid)
         call("stop")
+        deadline = time.monotonic() + 2
+        activity = ""
+        while time.monotonic() < deadline:
+            if activity_path.exists():
+                activity = activity_path.read_text(encoding="utf-8")
+                if "[stop]" in activity:
+                    break
+            time.sleep(0.05)
+        check("detailed GUI activity log", all(text in activity for text in (
+            "[scan_first] exact - 98, type - 4 Bytes | OK",
+            "[scan_next] decreased | OK", "[memory_read] range - ", "[disassemble] range - ")))
+        check("compact activity log without dumps", all(len(line.encode("utf-8")) <= 205
+            for line in activity.splitlines()) and "B8 07 00 00 00" not in activity)
         print(json.dumps({"passed":len(results), "checks":results}), flush=True)
     finally:
         # Only processes created by this test are stopped. Never touch existing CE/targets.

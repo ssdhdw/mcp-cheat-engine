@@ -125,11 +125,13 @@ function debug_removeBreakpoint(addr) gui(); test_breakpoints[addr]=nil; return 
 function createForm()
   return {show=function() end}
 end
+activity_log={}
 function createMemo()
   local lines = {Count=0}
-  function lines.add(s) lines.Count=lines.Count+1 end
+  function lines.add(s) lines.Count=lines.Count+1; activity_log[#activity_log+1]=s end
   function lines.delete(i) lines.Count=lines.Count-1 end
-  return {Lines=lines}
+  test_memo={Lines=lines}
+  return test_memo
 end
 function synchronize(fn) main=true; fn(); main=false end
 function createNativeThread(fn) worker=fn; return {} end
@@ -157,7 +159,67 @@ class LuaTests(unittest.TestCase):
             lua.globals().requests[i] = server.encode_request(op, *args)[4:].decode("ascii")
         lua.globals().ce_mcp.start()
         lua.globals().worker()
+        self.log_lines = [v for _, v in lua.globals().activity_log.items()]
+        self.log_count = lua.globals().test_memo.Lines.Count
+        self.log_wrap = lua.globals().test_memo.WordWrap
         return [json.loads(v) for _, v in lua.globals().responses.items()]
+
+    def test_activity_records_show_address_value_and_type(self):
+        result = self.run_commands([
+            ("add", (42, "014B0F50", "Health", "dword")),
+            ("value", (42, 1, "-10")),
+            ("freeze", (42, 1, "1")),
+            ("value", (42, 99, "20")),
+        ])
+        self.assertIn("[add] address - 014B0F50, value - 7, type - 4 Bytes | OK", self.log_lines[1])
+        self.assertIn("[value] address - 014B0F50, value - -10 | OK", self.log_lines[2])
+        self.assertIn("[freeze] address - 014B0F50, freeze | OK", self.log_lines[3])
+        self.assertIn("[value] record - 99, value - 20 | FAILED", self.log_lines[4])
+        self.assertFalse(result[3]["ok"])
+        self.assertFalse(self.log_wrap)
+
+    def test_activity_scans_distinguish_first_next_and_values(self):
+        self.run_commands([
+            ("scan_first", (42, "dword", "exact", "98", "", "1000", "2000")),
+            ("scan_status", (42,)), ("scan_status", (42,)), ("scan_status", (42,)),
+            ("scan_next", (42, "between", "80", "90")),
+        ])
+        self.assertIn("[scan_first] exact - 98, type - 4 Bytes | OK", self.log_lines[1])
+        self.assertIn("[scan_next] between - 80..90 | OK", self.log_lines[5])
+        self.assertIn("[scan_status] busy | OK", self.log_lines[2])
+
+    def test_activity_memory_and_disassembly_show_ranges_not_dumps(self):
+        self.run_commands([
+            ("memory_read", (42, "1000", 4)),
+            ("memory_write", (42, "1000", "90 91", "90 90")),
+            ("disassemble", (42, "1000", 3)),
+            ("memory_read", (42, "5000", 2)),
+            ("state", ()),
+        ])
+        self.assertIn("[memory_read] range - 00001000-00001003 | OK", self.log_lines[1])
+        self.assertIn("[memory_write] range - 00001000-00001001 | OK", self.log_lines[2])
+        self.assertIn("[disassemble] range - 00001000-00001005 | OK", self.log_lines[3])
+        self.assertIn("[memory_read] range - 00005000-00005001 | FAILED", self.log_lines[4])
+        self.assertNotIn("range", self.log_lines[5])
+        self.assertTrue(all("90 90" not in line and "nop" not in line for line in self.log_lines))
+
+    def test_activity_truncates_multiline_text_and_never_logs_script_bodies(self):
+        secret_body = "[ENABLE]\n// BODY_MUST_NOT_BE_LOGGED\n[DISABLE]"
+        self.run_commands([
+            ("script_add", (42, "Injection\r\n" + "Тест" * 80 + "\u2028another line", secret_body)),
+            ("scan_first", (42, "dword", "exact", "9" * 500, "", "1000", "2000")),
+        ])
+        for line in self.log_lines:
+            self.assertNotIn("\n", line)
+            self.assertNotIn("\r", line)
+            self.assertNotIn("\u2028", line)
+            self.assertNotIn("BODY_MUST_NOT_BE_LOGGED", line)
+            self.assertLessEqual(len(line.encode("utf-8")), 205)
+        self.assertIn("...", self.log_lines[1])
+
+    def test_activity_keeps_only_200_visible_lines(self):
+        self.run_commands([("state", ())] * 220)
+        self.assertEqual(self.log_count, 200)
 
     def test_gui_roundtrip_unicode_and_freeze(self):
         result = self.run_commands([
