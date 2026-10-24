@@ -1,9 +1,9 @@
 name: MCP bridge tests
 on:
   push:
-    paths: ['mcp/**', '.github/workflows/mcp-tests.yml']
+    paths: ['mcp/**', 'Cheat Engine/bin/autorun/ce_mcp.lua', '.github/workflows/mcp-tests.yml']
   pull_request:
-    paths: ['mcp/**', '.github/workflows/mcp-tests.yml']
+    paths: ['mcp/**', 'Cheat Engine/bin/autorun/ce_mcp.lua', '.github/workflows/mcp-tests.yml']
 jobs:
   bridge:
     runs-on: windows-latest

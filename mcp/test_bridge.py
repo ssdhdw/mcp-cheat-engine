@@ -10,9 +10,11 @@ import sys
 import threading
 import unittest
 import uuid
+import tempfile
 
 from lupa import LuaRuntime
 import server
+import install_autorun
 
 HARNESS = r'''
 vtByte, vtWord, vtDword, vtQword, vtSingle, vtDouble = 0,1,2,3,4,5
@@ -149,6 +151,39 @@ class PipeTests(unittest.TestCase):
 
 
 class AdditionalTests(unittest.TestCase):
+    def test_packaged_autorun_starts_without_console_and_is_self_contained(self):
+        packaged = install_autorun.PACKAGED.read_text(encoding="utf-8")
+        self.assertEqual(packaged, install_autorun.render_autorun())
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.execute(HARNESS)
+        lua.execute(packaged)
+        self.assertTrue(lua.globals().ce_mcp.running)
+        # Reloading the autorun must not create a second worker.
+        lua.execute(packaged)
+        for i, op in enumerate(("state", "stop"), 1):
+            lua.globals().requests[i] = server.encode_request(op)[4:].decode("ascii")
+        lua.globals().worker()
+        result = json.loads(lua.globals().responses[1])
+        self.assertEqual(result["result"], {"pid":42, "record_count":0})
+
+    def test_autorun_install_update_and_uninstall_preserve_other_files(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory / "cheatengine-x86_64.exe").touch()
+            target = install_autorun.install(directory)
+            self.assertEqual(target.read_text(encoding="utf-8"), install_autorun.render_autorun())
+            install_autorun.install(directory)
+            other = target.with_name("other.lua")
+            other.write_text("-- user script", encoding="utf-8")
+            install_autorun.install(directory, uninstall=True)
+            self.assertFalse(target.exists())
+            self.assertTrue(other.exists())
+            target.write_text("-- user script", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                install_autorun.install(directory)
+            with self.assertRaises(ValueError):
+                install_autorun.install(directory, uninstall=True)
+
     def test_script_record_cannot_be_written_or_activated(self):
         lua = LuaRuntime(unpack_returned_tuples=True)
         lua.execute(HARNESS)
