@@ -1,5 +1,10 @@
 -- Load from CE's Lua console, then explicitly call ce_mcp.start().
 -- Pipe I/O runs on a worker; ALL access to CE state and controls is synchronized.
+-- TODO(security): Replace upstream createPipe's broad local ACL with a native
+-- pipe server restricted to the current Windows user (and reject remote clients).
+-- Add per-connection read deadlines and a GUI switch to enable/disable agent access.
+-- Keep setup automatic: do not require users to copy a shared token manually.
+-- Until then, local processes with pipe access can write memory and enable scripts.
 assert(not ce_mcp, 'MCP bridge is already loaded')
 ce_mcp = {}
 local MAX_FRAME = 1024 * 1024
