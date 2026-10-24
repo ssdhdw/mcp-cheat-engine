@@ -10,8 +10,9 @@ This fork includes an experimental MCP bridge for AI agents to interact with
 the live Cheat Engine GUI. See [MCP setup, tools, tests, and limitations](mcp/README.md).
 The bridge starts automatically from the bundled `bin/autorun/ce_mcp.lua`;
 an installer is included for existing Cheat Engine installations.
-The first version supports process selection and numeric address-list records;
-memory scans and debugger integration are not yet implemented.
+The bridge supports GUI scans and scan results, numeric and pointer records,
+memory inspection and conditional writes, disassembly, hardware watchpoints,
+and visible Auto Assembler script records.
 
 Cheat Engine is a development environment focused on modding games and applications for personal use.
 

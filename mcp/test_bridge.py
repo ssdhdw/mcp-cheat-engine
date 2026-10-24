@@ -18,6 +18,8 @@ import install_autorun
 
 HARNESS = r'''
 vtByte, vtWord, vtDword, vtQword, vtSingle, vtDouble = 0,1,2,3,4,5
+vtAutoAssembler = 11
+bptWrite, bptAccess, bptExecute, bpmDebugRegister, co_run = 1,2,0,0,0
 alClient = 5
 local main = false
 local function gui() assert(main, 'CE API accessed outside GUI thread') end
@@ -26,7 +28,19 @@ local records = {}
 local al = {Count=0}
 function al.createMemoryRecord()
   gui()
-  local r = {ID=al.Count+1, Type=2, Address='', Description='', Value='7', Active=false}
+  local r = {ID=al.Count+1, _type=2, Address='', Description='', Value='7', _active=false,
+    OffsetCount=0, Offset={}}
+  setmetatable(r, {
+    __index=function(t,k)
+      if k=='Type' then return t._type elseif k=='Active' then return t._active end
+    end,
+    __newindex=function(t,k,v)
+      if k=='Type' then rawset(t,'_type',v); rawset(t,'Script','')
+      elseif k=='Active' then
+        if v and t._type==11 then assert(t.Script:find('%[ENABLE%]'), 'Script cleared by Type change') end
+        rawset(t,'_active',v)
+      else rawset(t,k,v) end
+    end})
   function r.destroy() al.Count=al.Count-1 end
   records[al.Count] = r
   al.Count=al.Count+1
@@ -42,7 +56,72 @@ function getAddressList() gui(); return al end
 function getOpenedProcessID() gui(); return pid end
 function getProcesslist() gui(); return {[42]='Tutorial.exe'} end
 function openProcess(n) gui(); assert(type(n)=='number'); pid=n; return true end
-function getAddressSafe(a) gui(); if a == 'invalid' then return nil end; return 4096 end
+function getAddressSafe(a) gui(); if a == 'invalid' then return nil end; return tonumber(a,16) or 4096 end
+function getOpenedProcessHandle() gui(); return pid+100 end
+function targetIs64Bit() gui(); return true end
+local form = {btnNewScan={Enabled=true}, btnNextScan={Enabled=false}, btnFirst={Tag=0},
+  VarType={ItemIndex=3}, ScanType={ItemIndex=0}, FromAddress={Text='1000'}, ToAddress={Text='2000'},
+  scanvalue={Text=''}, scanvalue2={Text=''}, cbLuaFormula={}, cbNot={}, cbpercentage={}, cbHexadecimal={}}
+local scan = {LastScanWasRegionScan=false, FoundList={Count=2, Address={[0]='1000',[1]='1004'},
+  Value={[0]='90',[1]='98'}}}
+local ticks=0
+function scan.getProgress()
+  gui()
+  if not form.btnNewScan.Enabled then
+    ticks=ticks+1
+    if ticks >= 2 then
+      form.btnNewScan.Enabled=true; form.btnFirst.Tag=2; form.btnNextScan.Enabled=true
+    end
+  end
+  return {TotalAddressesToScan=1000, CurrentlyScanned=ticks*500, ResultsFound=2}
+end
+function form.VarType.OnChange(sender) gui() end
+function form.ScanType.OnChange(sender) gui() end
+function form.btnNewScan.doClick()
+  gui()
+  if form.btnFirst.Tag==2 then
+    form.btnFirst.Tag=0; form.btnNextScan.Enabled=false
+  else
+    form.btnNewScan.Enabled=false; ticks=0
+    scan.LastScanWasRegionScan=form.ScanType.ItemIndex==4
+  end
+end
+function form.btnNextScan.doClick()
+  gui(); form.btnNewScan.Enabled=false; ticks=0; scan.LastScanWasRegionScan=false
+end
+function getMainForm() gui(); return form end
+function getCurrentMemscan() gui(); return scan end
+local memoryview = {DisassemblerView={}, HexadecimalView={}, show=function() gui() end}
+function getMemoryViewForm() gui(); return memoryview end
+function enumModules() gui(); return {{Name='Tutorial.exe', Address=4096, Size=8192, PathToFile='C:/Tutorial.exe'}} end
+local memory = {[4096]=144,[4097]=144,[4098]=100,[4099]=0}
+function readBytes(addr,size,astable)
+  gui()
+  if addr>=20480 then return nil end
+  local result={}
+  for i=0,size-1 do result[i+1]=memory[addr+i] or 0 end
+  return result
+end
+function writeBytes(addr,bytes)
+  gui()
+  for i,b in ipairs(bytes) do memory[addr+i-1]=b end
+  return #bytes
+end
+function readPointer(addr) gui(); return ({[4096]=8192,[8208]=12288})[addr] end
+function getInstructionSize(addr) gui(); return 2 end
+function disassemble(addr) gui(); return string.format('%X - 90 90 - nop', addr) end
+local debugging=false
+test_breakpoints={}
+function debug_isDebugging() gui(); return debugging end
+function debugProcess(interface) gui(); assert(interface==1); debugging=true end
+function debug_getBreakpointList()
+  gui(); local r={}; for addr,_ in pairs(test_breakpoints) do r[#r+1]=addr end; return r
+end
+function debug_setBreakpoint(addr,size,trigger,method,onhit)
+  gui(); test_breakpoints[addr]=onhit; RIP=addr+2; RAX=123; onhit()
+end
+function debug_continueFromBreakpoint(method) gui(); assert(method==co_run) end
+function debug_removeBreakpoint(addr) gui(); test_breakpoints[addr]=nil; return true end
 function createForm()
   return {show=function() end}
 end
@@ -112,6 +191,96 @@ class LuaTests(unittest.TestCase):
                     ("execute_lua", ("print('no')",))]
         result = self.run_commands(commands)
         self.assertTrue(all(not r["ok"] for r in result[:-1]), result)
+
+    def test_async_gui_scan_and_results(self):
+        result = self.run_commands([
+            ("scan_first", (42, "dword", "exact", "98", "", "1000", "2000")),
+            ("scan_results", (42, 0, 10)),
+            ("scan_status", (42,)), ("scan_status", (42,)), ("scan_status", (42,)),
+            ("scan_results", (42, 0, 1)),
+            ("scan_next", (42, "decreased", "", "")),
+            ("scan_status", (42,)), ("scan_status", (42,)), ("scan_status", (42,)),
+            ("scan_reset", (42,)),
+        ])
+        self.assertTrue(result[0]["ok"], result)
+        self.assertFalse(result[1]["ok"])
+        self.assertTrue(result[2]["result"]["busy"])
+        self.assertFalse(result[4]["result"]["busy"])
+        self.assertEqual(result[5]["result"]["results"], [{"index":0,"address":"1000","value":"90"}])
+        self.assertTrue(result[6]["ok"])
+        self.assertFalse(result[10]["result"]["has_scan"])
+
+    def test_unknown_scan_needs_narrowing_and_validation(self):
+        result = self.run_commands([
+            ("scan_first", (42, "float", "unknown", "", "", "1000", "2000")),
+            ("scan_status", (42,)), ("scan_status", (42,)), ("scan_status", (42,)),
+            ("scan_results", (42, 0, 10)),
+            ("scan_first", (42, "dword", "between", "1", "bad", "1000", "2000")),
+            ("scan_first", (42, "dword", "exact", "98", "", "3000", "2000")),
+        ])
+        self.assertTrue(result[0]["ok"])
+        self.assertTrue(all(not r["ok"] for r in result[4:-1]), result)
+
+    def test_memory_patch_is_conditional_and_returns_original(self):
+        result = self.run_commands([
+            ("memory_read", (42, "1000", 4)),
+            ("memory_write", (42, "1000", "90 91", "90 90")),
+            ("memory_write", (42, "1000", "90 92", "90 90")),
+            ("memory_read", (42, "1000", 2)),
+            ("memory_read", (99, "1000", 2)),
+            ("memory_read", (42, "1000", 4097)),
+        ])
+        self.assertEqual(result[0]["result"]["hex"], "90 90 64 00")
+        self.assertEqual(result[1]["result"]["original"], "90 90")
+        self.assertTrue(result[1]["result"]["verified"])
+        self.assertFalse(result[2]["ok"])
+        self.assertEqual(result[3]["result"]["hex"], "90 91")
+        self.assertTrue(all(not r["ok"] for r in result[4:-1]))
+
+    def test_modules_disassembly_and_pointer_record(self):
+        result = self.run_commands([
+            ("modules", (42,)),
+            ("disassemble", (42, "1000", 2)),
+            ("pointer_resolve", (42, "1000", "16,4")),
+            ("pointer_add", (42, "1000", "16,4", "health pointer", "dword")),
+            ("record_rename", (42, 1, "Health")),
+            ("pointer_resolve", (42, "1000", "16,,4")),
+        ])
+        self.assertEqual(result[0]["result"][0]["address"], "1000")
+        self.assertEqual(result[1]["result"][1]["address"], "1002")
+        self.assertEqual(result[2]["result"]["address"], "3004")
+        self.assertEqual(result[3]["result"]["pointer_offsets"], [16, 4])
+        self.assertEqual(result[4]["result"]["description"], "Health")
+        self.assertFalse(result[5]["ok"])
+
+    def test_watch_captures_registers_and_removes_only_owned_breakpoint(self):
+        result = self.run_commands([
+            ("watch_add", (42, "1000", "write", 4)),
+            ("watch_hits", (42, "1000")),
+            ("watch_add", (42, "1000", "write", 4)),
+            ("watch_remove", (42, "1000")),
+            ("watch_hits", (42, "1000")),
+            ("watch_add", (42, "1001", "write", 4)),
+        ])
+        self.assertTrue(result[0]["result"]["armed"])
+        self.assertEqual(result[1]["result"]["hits"][0]["registers"]["RAX"], "7B")
+        self.assertFalse(result[2]["ok"])
+        self.assertTrue(result[3]["result"]["removed"])
+        self.assertFalse(result[4]["ok"])
+        self.assertFalse(result[5]["ok"])
+
+    def test_assembler_scripts_are_inactive_until_explicit_enable(self):
+        script = "[ENABLE]\n1000:\nnop\n[DISABLE]\n1000:\ndb 90"
+        result = self.run_commands([
+            ("script_add", (42, "Tutorial injection", script)),
+            ("script_enable", (42, 1, "1")),
+            ("script_enable", (42, 1, "0")),
+            ("script_add", (42, "Invalid", "nop")),
+        ])
+        self.assertFalse(result[0]["result"]["frozen"])
+        self.assertTrue(result[1]["result"]["frozen"])
+        self.assertFalse(result[2]["result"]["frozen"])
+        self.assertFalse(result[3]["ok"])
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows named pipes")
@@ -237,7 +406,7 @@ class McpTests(unittest.TestCase):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.list_tools()
-                    self.assertEqual(len(result.tools), 8)
+                    self.assertEqual(len(result.tools), 25)
                     # A missing pipe must be a tool error, not a successful result.
                     response = await session.call_tool("get_state", {})
                     self.assertTrue(response.isError)
