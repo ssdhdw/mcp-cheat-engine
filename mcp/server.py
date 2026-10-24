@@ -14,8 +14,8 @@ LOCK = threading.Lock()
 mcp = FastMCP("Cheat Engine GUI")
 
 
-def encode_request(token, operation, *args):
-    payload = "\t".join(quote(str(v), safe="") for v in (token, operation, *args)).encode("ascii")
+def encode_request(operation, *args):
+    payload = "\t".join(quote(str(v), safe="") for v in (operation, *args)).encode("ascii")
     if len(payload) > MAX_FRAME:
         raise ValueError("Request too large")
     return struct.pack("<I", len(payload)) + payload
@@ -88,14 +88,11 @@ def exchange(frame, pipe_name, timeout=10):
 
 
 def call(operation, *args):
-    token = os.environ.get("CE_MCP_TOKEN", "")
     pipe = os.environ.get("CE_MCP_PIPE", "ce-mcp")
-    if not re.fullmatch(r"[0-9a-f]{64}", token):
-        raise ValueError("CE_MCP_TOKEN must be a 64-character lowercase hex secret")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", pipe):
         raise ValueError("Invalid CE_MCP_PIPE")
     with LOCK:
-        response = exchange(encode_request(token, operation, *args), pipe)
+        response = exchange(encode_request(operation, *args), pipe)
     if not response.get("ok"):
         raise ValueError(response.get("error", "CE command failed"))
     return response["result"]

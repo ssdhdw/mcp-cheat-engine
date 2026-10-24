@@ -1,4 +1,4 @@
--- Load from CE's Lua console, then explicitly call ce_mcp.start(pipeName, token).
+-- Load from CE's Lua console, then explicitly call ce_mcp.start().
 -- Pipe I/O runs on a worker; ALL access to CE state and controls is synchronized.
 assert(not ce_mcp, 'MCP bridge is already loaded')
 ce_mcp = {}
@@ -42,7 +42,7 @@ local function snapshot(r)
 end
 
 local function dispatch(a)
-  local op, al = a[2], getAddressList()
+  local op, al = a[1], getAddressList()
   if op == 'state' then
     return json({pid=getOpenedProcessID(), record_count=al.Count})
   elseif op == 'processes' then
@@ -50,12 +50,12 @@ local function dispatch(a)
     for pid, name in pairs(getProcesslist()) do result[#result+1] = {pid=pid, name=name} end
     return array(result)
   elseif op == 'attach' then
-    local pid = integer(a[3], 1, 4294967295)
+    local pid = integer(a[2], 1, 4294967295)
     -- tonumber is important: CE interprets Lua strings as process names.
     assert(openProcess(pid), 'Could not open process')
     return json({pid=getOpenedProcessID()})
   elseif op == 'records' then
-    local offset, limit = integer(a[3], 0, 2147483647), integer(a[4], 1, 200)
+    local offset, limit = integer(a[2], 0, 2147483647), integer(a[3], 1, 200)
     local result = {}
     for i=offset, math.min(al.Count-1, offset+limit-1) do
       result[#result+1] = snapshot(al[i])
@@ -66,31 +66,31 @@ local function dispatch(a)
     return json({stopped=true})
   end
   assert(op == 'add' or op == 'value' or op == 'freeze', 'Unknown operation')
-  local pid = integer(a[3], 1, 4294967295)
+  local pid = integer(a[2], 1, 4294967295)
   assert(pid == getOpenedProcessID(), 'Attached process changed; refresh state')
   local r
   if op == 'add' then
-    assert(a[4] and #a[4] > 0 and #a[4] <= 1024, 'Invalid address')
-    assert(a[5] and #a[5] <= 1024, 'Invalid description')
-    local vt = assert(types[a[6]], 'Unsupported numeric type')
-    assert(getAddressSafe(a[4]), 'Address could not be resolved')
+    assert(a[3] and #a[3] > 0 and #a[3] <= 1024, 'Invalid address')
+    assert(a[4] and #a[4] <= 1024, 'Invalid description')
+    local vt = assert(types[a[5]], 'Unsupported numeric type')
+    assert(getAddressSafe(a[3]), 'Address could not be resolved')
     r = al.createMemoryRecord()
     local ok, err = pcall(function()
       r.Type = vt
-      r.Address = a[4]
-      r.Description = a[5]
+      r.Address = a[3]
+      r.Description = a[4]
     end)
     if not ok then r.destroy(); error(err) end
   else
-    r = assert(al.getMemoryRecordByID(integer(a[4], 0, 2147483647)), 'Record not found')
+    r = assert(al.getMemoryRecordByID(integer(a[3], 0, 2147483647)), 'Record not found')
     assert(numeric[r.Type] and not r.IsGroupHeader, 'Only numeric memory records are supported')
     if op == 'value' then
-      assert(a[5] and #a[5] <= 128 and tonumber(a[5]), 'Invalid numeric value')
-      r.Value = a[5]
+      assert(a[4] and #a[4] <= 128 and tonumber(a[4]), 'Invalid numeric value')
+      r.Value = a[4]
     else
-      assert(a[5] == '0' or a[5] == '1', 'Invalid freeze state')
-      r.Active = a[5] == '1'
-      assert(r.Active == (a[5] == '1'), 'CE rejected freeze change')
+      assert(a[4] == '0' or a[4] == '1', 'Invalid freeze state')
+      r.Active = a[4] == '1'
+      assert(r.Active == (a[4] == '1'), 'CE rejected freeze change')
     end
   end
   al.SelectedRecord = r
@@ -98,10 +98,9 @@ local function dispatch(a)
   return json(snapshot(r))
 end
 
-function ce_mcp.start(pipeName, token)
+function ce_mcp.start(pipeName)
+  pipeName = pipeName or 'ce-mcp'
   assert(not ce_mcp.worker, 'Bridge worker already exists; restart CE to reconfigure')
-  assert(type(token) == 'string' and #token == 64 and token:match('^[0-9a-f]+$'),
-         'Use a random 64-character lowercase hex token')
   assert(type(pipeName) == 'string' and #pipeName <= 100 and pipeName:match('^[%w_-]+$'),
          'Invalid pipe name')
   local form = createForm(false)
@@ -135,16 +134,12 @@ function ce_mcp.start(pipeName, token)
           args[#args+1] = field:gsub('%%(%x%x)', function(h) return string.char(tonumber(h,16)) end)
         end
         local response
-        if args[1] ~= token then
-          response = json({ok=false, error='Unauthorized'})
-        else
-          synchronize(function()
-            local ok, result = pcall(dispatch, args)
-            log((args[2] or '?'):gsub('[%c]', '?') .. (ok and ' OK' or ' FAILED'))
-            response = ok and ('{"ok":true,"result":' .. result .. '}')
-                          or json({ok=false, error=tostring(result)})
-          end)
-        end
+        synchronize(function()
+          local ok, result = pcall(dispatch, args)
+          log((args[1] or '?'):gsub('[%c]', '?') .. (ok and ' OK' or ' FAILED'))
+          response = ok and ('{"ok":true,"result":' .. result .. '}')
+                        or json({ok=false, error=tostring(result)})
+        end)
         assert(#response <= MAX_FRAME, 'Response too large')
         pipe.writeDword(#response)
         pipe.writeString(response)

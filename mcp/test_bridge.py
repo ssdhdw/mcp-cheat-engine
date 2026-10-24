@@ -14,7 +14,6 @@ import uuid
 from lupa import LuaRuntime
 import server
 
-TOKEN = "a" * 64
 HARNESS = r'''
 vtByte, vtWord, vtDword, vtQword, vtSingle, vtDouble = 0,1,2,3,4,5
 alClient = 5
@@ -73,21 +72,21 @@ class LuaTests(unittest.TestCase):
         lua = LuaRuntime(unpack_returned_tuples=True)
         lua.execute(HARNESS)
         lua.execute(Path(__file__).with_name("ce_bridge.lua").read_text(encoding="utf-8"))
-        for i, (token, op, args) in enumerate(commands + [(TOKEN, "stop", ())], 1):
-            lua.globals().requests[i] = server.encode_request(token, op, *args)[4:].decode("ascii")
-        lua.globals().ce_mcp.start("ce-mcp-test", TOKEN)
+        for i, (op, args) in enumerate(commands + [("stop", ())], 1):
+            lua.globals().requests[i] = server.encode_request(op, *args)[4:].decode("ascii")
+        lua.globals().ce_mcp.start()
         lua.globals().worker()
         return [json.loads(v) for _, v in lua.globals().responses.items()]
 
     def test_gui_roundtrip_unicode_and_freeze(self):
         result = self.run_commands([
-            (TOKEN, "state", ()),
-            (TOKEN, "add", (42, "1000", 'Здоровье\t"\\\n', "dword")),
-            (TOKEN, "value", (42, 1, "99")),
-            (TOKEN, "freeze", (42, 1, "1")),
-            (TOKEN, "records", (0, 100)),
-            (TOKEN, "processes", ()),
-            (TOKEN, "attach", (43,)),
+            ("state", ()),
+            ("add", (42, "1000", 'Здоровье\t"\\\n', "dword")),
+            ("value", (42, 1, "99")),
+            ("freeze", (42, 1, "1")),
+            ("records", (0, 100)),
+            ("processes", ()),
+            ("attach", (43,)),
         ])
         self.assertTrue(all(r["ok"] for r in result), result)
         self.assertEqual(result[1]["result"]["description"], 'Здоровье\t"\\\n')
@@ -95,22 +94,20 @@ class LuaTests(unittest.TestCase):
         self.assertTrue(result[4]["result"][0]["frozen"])
         self.assertEqual(result[6]["result"]["pid"], 43)
 
-    def test_unauthorized_and_pid_change_do_not_mutate(self):
+    def test_pid_change_does_not_mutate(self):
         result = self.run_commands([
-            ("b"*64, "attach", (99,)),
-            (TOKEN, "add", (99, "1000", "wrong pid", "dword")),
-            (TOKEN, "state", ()),
+            ("add", (99, "1000", "wrong pid", "dword")),
+            ("state", ()),
         ])
         self.assertFalse(result[0]["ok"])
-        self.assertFalse(result[1]["ok"])
-        self.assertEqual(result[2]["result"], {"pid":42, "record_count":0})
+        self.assertEqual(result[1]["result"], {"pid":42, "record_count":0})
 
     def test_validation_and_unknown_operation(self):
-        commands = [(TOKEN, "add", (42, "1000", "script", "autoassembler")),
-                    (TOKEN, "add", (42, "invalid", "bad address", "dword")),
-                    (TOKEN, "records", (0, 201)),
-                    (TOKEN, "value", (42, 123, "99")),
-                    (TOKEN, "execute_lua", ("print('no')",))]
+        commands = [("add", (42, "1000", "script", "autoassembler")),
+                    ("add", (42, "invalid", "bad address", "dword")),
+                    ("records", (0, 201)),
+                    ("value", (42, 123, "99")),
+                    ("execute_lua", ("print('no')",))]
         result = self.run_commands(commands)
         self.assertTrue(all(not r["ok"] for r in result[:-1]), result)
 
@@ -144,7 +141,7 @@ class PipeTests(unittest.TestCase):
                 pipe.Close()
         thread = threading.Thread(target=peer, daemon=True)
         thread.start()
-        response = server.exchange(server.encode_request(TOKEN, "state"), pipe_name)
+        response = server.exchange(server.encode_request("state"), pipe_name)
         thread.join(5)
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
@@ -159,8 +156,8 @@ class AdditionalTests(unittest.TestCase):
         lua.execute("synchronize(function() local r=getAddressList().createMemoryRecord(); r.Type=11 end)")
         commands = [("value", (42, 1, "99")), ("freeze", (42, 1, "1")), ("stop", ())]
         for i, (op, args) in enumerate(commands, 1):
-            lua.globals().requests[i] = server.encode_request(TOKEN, op, *args)[4:].decode("ascii")
-        lua.globals().ce_mcp.start("test", TOKEN)
+            lua.globals().requests[i] = server.encode_request(op, *args)[4:].decode("ascii")
+        lua.globals().ce_mcp.start("test")
         lua.globals().worker()
         result = [json.loads(v) for _, v in lua.globals().responses.items()]
         self.assertFalse(result[0]["ok"])
@@ -186,7 +183,7 @@ class AdditionalTests(unittest.TestCase):
         thread.start()
         try:
             with self.assertRaisesRegex(TimeoutError, 'outcome unknown'):
-                server.exchange(server.encode_request(TOKEN, "state"), pipe_name, timeout=0.1)
+                server.exchange(server.encode_request("state"), pipe_name, timeout=0.1)
         finally:
             release.set()
             thread.join(5)
@@ -200,7 +197,7 @@ class McpTests(unittest.TestCase):
 
         async def run():
             params = StdioServerParameters(command=sys.executable,
-                args=[str(Path(__file__).with_name("server.py"))], env={"CE_MCP_TOKEN":TOKEN})
+                args=[str(Path(__file__).with_name("server.py"))], env={"CE_MCP_PIPE":"ce-mcp-missing-" + uuid.uuid4().hex})
             async with stdio_client(params) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
